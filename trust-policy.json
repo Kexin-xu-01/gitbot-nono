@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "publishers": [
+    {
+      "name": "local-dev",
+      "key_id": "default",
+      "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbIMxighQjFRUFBLOpRDiVBTsnu4S5mVJfPIIo7pKiOCx9NLrFgAbBQmgBeMTjl/5Vz3PJD2eUu2FMCLtk/Vs2w=="
+    }
+  ],
+  "includes": ["GEMINI.md"],
+  "blocklist": { "digests": [] },
+  "enforcement": "deny"
+}

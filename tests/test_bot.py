@@ -190,7 +190,7 @@ class TestWebhookRoute:
         payload = _issue_payload(action="opened", number=10, title="Crash on boot")
 
         mock_context = {
-            "nono_docs": "nono docs here",
+            "project_docs": "project docs here",
             "recent_issues": [],
             "gemini_md": "# Instructions",
             "is_first_contribution": True,

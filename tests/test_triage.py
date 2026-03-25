@@ -98,9 +98,9 @@ def test_all_valid_labels_accepted():
 # _build_user_turn tests
 # ---------------------------------------------------------------------------
 
-def _make_context(docs="nono is cool", issues=None):
+def _make_context(docs="project docs", issues=None):
     return {
-        "nono_docs": docs,
+        "project_docs": docs,
         "recent_issues": issues or [],
         "gemini_md": "# Instructions",
         "is_first_contribution": False,

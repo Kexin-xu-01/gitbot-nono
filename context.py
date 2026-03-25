@@ -1,41 +1,51 @@
 """
 context.py — Context loading for the triage bot.
 
-Fetches nono docs, recent GitHub issues, and the GEMINI.md instruction file.
-All expensive network calls are cached; nono only permits GEMINI.md reads after
-trust verification passes at startup (enforced by Seatbelt/Sandbox policy).
+Fetches project docs (via DOCS_URL), recent GitHub issues, and the GEMINI.md
+instruction file. All expensive network calls are cached; nono only permits
+GEMINI.md reads after trust verification passes at startup (enforced by
+Seatbelt/Sandbox policy).
 """
 
+import os
 import time
 import logging
 import requests
-from github import Github, GithubException
 
 logger = logging.getLogger(__name__)
 
 # Module-level caches
-_nono_docs_cache: str | None = None
+_docs_cache: str | None = None
 _recent_issues_cache: tuple[list, float] | None = None
 
 _ISSUES_TTL_SECONDS = 300  # 5 minutes
 
+DOCS_URL: str = os.environ.get("DOCS_URL", "")
 
-def get_nono_docs() -> str:
-    """Fetch nono.sh homepage content. Cached for the process lifetime."""
-    global _nono_docs_cache
-    if _nono_docs_cache is not None:
-        return _nono_docs_cache
+
+def get_project_docs() -> str:
+    """Fetch project docs from DOCS_URL. Cached for the process lifetime.
+
+    If DOCS_URL is not set, returns empty string (docs enrichment is optional).
+    """
+    global _docs_cache
+    if _docs_cache is not None:
+        return _docs_cache
+
+    if not DOCS_URL:
+        _docs_cache = ""
+        return _docs_cache
 
     try:
-        resp = requests.get("https://nono.sh", timeout=10)
+        resp = requests.get(DOCS_URL, timeout=10)
         resp.raise_for_status()
-        _nono_docs_cache = resp.text
-        logger.info("Fetched nono docs (%d chars)", len(_nono_docs_cache))
+        _docs_cache = resp.text
+        logger.info("Fetched project docs from %s (%d chars)", DOCS_URL, len(_docs_cache))
     except Exception as exc:
-        logger.warning("Could not fetch nono docs: %s", exc)
-        _nono_docs_cache = ""
+        logger.warning("Could not fetch project docs from %s: %s", DOCS_URL, exc)
+        _docs_cache = ""
 
-    return _nono_docs_cache
+    return _docs_cache
 
 
 def get_recent_issues(repo_name: str, token: str) -> list[dict]:
@@ -54,23 +64,37 @@ def get_recent_issues(repo_name: str, token: str) -> list[dict]:
 
     issues = []
     try:
-        gh = Github(token)
-        repo = gh.get_repo(repo_name)
-        for issue in repo.get_issues(state="all", sort="created", direction="desc"):
-            if issue.pull_request:
+        # Under nono proxy mode, GITHUB_BASE_URL points to the localhost proxy
+        # (e.g. http://127.0.0.1:PORT/github). We call the proxy instead of
+        # api.github.com directly because the process only holds a phantom token,
+        # not the real GitHub token. The proxy validates the phantom token and
+        # swaps it for the real credential before forwarding upstream.
+        # We use requests directly instead of PyGithub because PyGithub's domain
+        # assertion rejects localhost URLs when following paginated links.
+        base_url = os.environ.get("GITHUB_BASE_URL", "https://api.github.com")
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+        resp = requests.get(
+            f"{base_url}/repos/{repo_name}/issues",
+            headers=headers,
+            params={"state": "all", "sort": "created", "direction": "desc", "per_page": 30},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        for item in resp.json():
+            if item.get("pull_request"):
                 continue
             issues.append(
                 {
-                    "number": issue.number,
-                    "title": issue.title,
-                    "state": issue.state,
-                    "user": issue.user.login if issue.user else "unknown",
+                    "number": item["number"],
+                    "title": item["title"],
+                    "state": item["state"],
+                    "user": item.get("user", {}).get("login", "unknown"),
                 }
             )
             if len(issues) >= 20:
                 break
         logger.info("Fetched %d recent issues for %s", len(issues), repo_name)
-    except GithubException as exc:
+    except Exception as exc:
         logger.warning("Could not fetch recent issues: %s", exc)
 
     _recent_issues_cache = (issues, now)
@@ -94,7 +118,7 @@ def build_context(issue_data: dict, token: str) -> dict:
     Assemble all context needed for triage and enrich issue_data in-place.
 
     Returns a dict with keys:
-      - nono_docs: str (truncated)
+      - project_docs: str (truncated, empty if DOCS_URL not set)
       - recent_issues: list[dict]
       - gemini_md: str
       - is_first_contribution: bool (also written into issue_data)
@@ -102,7 +126,7 @@ def build_context(issue_data: dict, token: str) -> dict:
     repo_name = issue_data["repo"]
     reporter = issue_data["user"]
 
-    nono_docs = get_nono_docs()
+    project_docs = get_project_docs()
     recent_issues = get_recent_issues(repo_name, token)
     gemini_md = load_gemini_md()
 
@@ -112,7 +136,7 @@ def build_context(issue_data: dict, token: str) -> dict:
     issue_data["is_first_contribution"] = is_first
 
     return {
-        "nono_docs": nono_docs[:3000],  # keep prompt within budget
+        "project_docs": project_docs[:3000],  # keep prompt within budget
         "recent_issues": recent_issues,
         "gemini_md": gemini_md,
         "is_first_contribution": is_first,
@@ -122,6 +146,6 @@ def build_context(issue_data: dict, token: str) -> dict:
 def warm_cache(repo_name: str, token: str) -> None:
     """Pre-populate caches at startup so the first webhook responds quickly."""
     logger.info("Warming context cache...")
-    get_nono_docs()
+    get_project_docs()
     get_recent_issues(repo_name, token)
     logger.info("Context cache warmed.")

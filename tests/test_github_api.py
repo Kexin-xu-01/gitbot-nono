@@ -14,8 +14,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
-from unittest.mock import MagicMock, patch, call
-from github import GithubException
+from unittest.mock import patch, MagicMock
+import requests
 
 import github_api
 
@@ -40,71 +40,104 @@ def _make_triage_result(label="bug", escalate=False, reason=""):
     }
 
 
+def _mock_response(status_code=200, json_data=None):
+    resp = MagicMock(spec=requests.Response)
+    resp.status_code = status_code
+    resp.json.return_value = json_data or {}
+    resp.raise_for_status.return_value = None
+    return resp
+
+
+def _mock_404_response():
+    resp = MagicMock(spec=requests.Response)
+    resp.status_code = 404
+    exc = requests.HTTPError(response=resp)
+    return exc
+
+
+def _mock_500_response():
+    resp = MagicMock(spec=requests.Response)
+    resp.status_code = 500
+    exc = requests.HTTPError(response=resp)
+    return exc
+
+
 # ---------------------------------------------------------------------------
 # ensure_label_exists
 # ---------------------------------------------------------------------------
 
-def test_ensure_label_exists_no_create_when_label_present():
-    repo = MagicMock()
-    repo.get_label.return_value = MagicMock()  # label exists
+@patch("github_api._gh_get")
+@patch("github_api._gh_post")
+def test_ensure_label_exists_no_create_when_label_present(mock_post, mock_get):
+    mock_get.return_value = {"name": "bug"}
 
-    github_api.ensure_label_exists(repo, "bug")
+    github_api.ensure_label_exists("owner/repo", "bug")
 
-    repo.get_label.assert_called_once_with("bug")
-    repo.create_label.assert_not_called()
-
-
-def test_ensure_label_exists_creates_on_404():
-    repo = MagicMock()
-    repo.get_label.side_effect = GithubException(404, {"message": "Not Found"}, None)
-
-    github_api.ensure_label_exists(repo, "bug")
-
-    repo.create_label.assert_called_once_with(name="bug", color="d73a4a")
+    mock_get.assert_called_once_with("/repos/owner/repo/labels/bug")
+    mock_post.assert_not_called()
 
 
-def test_ensure_label_exists_raises_on_non_404():
-    repo = MagicMock()
-    repo.get_label.side_effect = GithubException(500, {"message": "Server Error"}, None)
+@patch("github_api._gh_get")
+@patch("github_api._gh_post")
+def test_ensure_label_exists_creates_on_404(mock_post, mock_get):
+    mock_get.side_effect = _mock_404_response()
 
-    with pytest.raises(GithubException):
-        github_api.ensure_label_exists(repo, "bug")
+    github_api.ensure_label_exists("owner/repo", "bug")
+
+    mock_post.assert_called_once_with(
+        "/repos/owner/repo/labels", {"name": "bug", "color": "d73a4a"}
+    )
 
 
-def test_ensure_label_uses_correct_color():
+@patch("github_api._gh_get")
+def test_ensure_label_exists_raises_on_non_404(mock_get):
+    mock_get.side_effect = _mock_500_response()
+
+    with pytest.raises(requests.HTTPError):
+        github_api.ensure_label_exists("owner/repo", "bug")
+
+
+@patch("github_api._gh_get")
+@patch("github_api._gh_post")
+def test_ensure_label_uses_correct_color(mock_post, mock_get):
     for label, expected_color in github_api.LABEL_COLORS.items():
-        repo = MagicMock()
-        repo.get_label.side_effect = GithubException(404, {}, None)
-        github_api.ensure_label_exists(repo, label)
-        repo.create_label.assert_called_with(name=label, color=expected_color)
+        mock_get.side_effect = _mock_404_response()
+        mock_post.reset_mock()
+
+        github_api.ensure_label_exists("owner/repo", label)
+
+        mock_post.assert_called_with(
+            "/repos/owner/repo/labels", {"name": label, "color": expected_color}
+        )
 
 
 # ---------------------------------------------------------------------------
 # Label-before-comment ordering
 # ---------------------------------------------------------------------------
 
-def test_label_applied_before_comment():
+@patch("github_api._gh_get")
+@patch("github_api._gh_post")
+def test_label_applied_before_comment(mock_post, mock_get):
     """apply_label must be called before post_comment in post_response."""
+    mock_get.return_value = {"name": "bug"}  # label exists
+
     call_order = []
+    original_post = mock_post.side_effect
 
-    issue = MagicMock()
-    issue.html_url = "https://github.com/owner/repo/issues/42"
-    issue.add_to_labels.side_effect = lambda *a: call_order.append("label")
-    issue.create_comment.side_effect = lambda *a: call_order.append("comment")
+    def track_calls(path, json_body):
+        if "/labels" in path and "/issues/" in path:
+            call_order.append("label")
+        elif "/comments" in path:
+            call_order.append("comment")
+        return {}
 
-    repo = MagicMock()
-    repo.get_label.return_value = MagicMock()  # label exists
-    repo.get_issue.return_value = issue
+    mock_post.side_effect = track_calls
 
-    gh_mock = MagicMock()
-    gh_mock.get_repo.return_value = repo
-
-    with patch("github_api.Github", return_value=gh_mock):
-        github_api.post_response(
-            _make_issue_data(),
-            _make_triage_result(label="bug"),
-            token="fake-token",
-        )
+    github_api.post_response(
+        _make_issue_data(),
+        _make_triage_result(label="bug"),
+        token="fake-token",
+    )
 
     assert call_order == ["label", "comment"], (
         f"Expected label then comment, got: {call_order}"
@@ -115,19 +148,11 @@ def test_label_applied_before_comment():
 # Escalation logging
 # ---------------------------------------------------------------------------
 
-def test_escalation_printed_to_stdout(capsys):
-    issue = MagicMock()
-    issue.html_url = "https://github.com/owner/repo/issues/99"
-    issue.number = 99
-    issue.add_to_labels = MagicMock()
-    issue.create_comment = MagicMock()
-
-    repo = MagicMock()
-    repo.get_label.return_value = MagicMock()
-    repo.get_issue.return_value = issue
-
-    gh_mock = MagicMock()
-    gh_mock.get_repo.return_value = repo
+@patch("github_api._gh_get")
+@patch("github_api._gh_post")
+def test_escalation_printed_to_stdout(mock_post, mock_get, capsys):
+    mock_get.return_value = {"name": "security"}
+    mock_post.return_value = {}
 
     triage_result = _make_triage_result(
         label="security",
@@ -135,34 +160,24 @@ def test_escalation_printed_to_stdout(capsys):
         reason="Potential sandbox escape via symlink.",
     )
 
-    with patch("github_api.Github", return_value=gh_mock):
-        github_api.post_response(_make_issue_data(number=99), triage_result, token="fake")
+    github_api.post_response(_make_issue_data(number=99), triage_result, token="fake")
 
     captured = capsys.readouterr()
     assert "ESCALATION REQUIRED" in captured.out
     assert "sandbox escape" in captured.out.lower()
 
 
-def test_no_escalation_log_when_false(capsys):
-    issue = MagicMock()
-    issue.html_url = "https://github.com/owner/repo/issues/1"
-    issue.number = 1
-    issue.add_to_labels = MagicMock()
-    issue.create_comment = MagicMock()
+@patch("github_api._gh_get")
+@patch("github_api._gh_post")
+def test_no_escalation_log_when_false(mock_post, mock_get, capsys):
+    mock_get.return_value = {"name": "bug"}
+    mock_post.return_value = {}
 
-    repo = MagicMock()
-    repo.get_label.return_value = MagicMock()
-    repo.get_issue.return_value = issue
-
-    gh_mock = MagicMock()
-    gh_mock.get_repo.return_value = repo
-
-    with patch("github_api.Github", return_value=gh_mock):
-        github_api.post_response(
-            _make_issue_data(number=1),
-            _make_triage_result(escalate=False),
-            token="fake",
-        )
+    github_api.post_response(
+        _make_issue_data(number=1),
+        _make_triage_result(escalate=False),
+        token="fake",
+    )
 
     captured = capsys.readouterr()
     assert "ESCALATION" not in captured.out
