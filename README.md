@@ -32,6 +32,8 @@ GitHub Issue Opened
   200 OK  (always, to prevent GitHub retries)
 ```
 
+To add an extra layer of security, nono sandbox has been used to confine Gitbot. Read more about nono at https://github.com/always-further/nono. If you want to read more on how to wrap an AI agent in the nono sandbox, here is a blog: https://nono.sh/blog/wrapping-github-bot-with-nono.
+
 ---
 
 ## Setup
